@@ -1,9 +1,8 @@
-from flask import Flask, request
-from twilio.twiml.messaging_response import MessagingResponse
+from flask import Flask, request, jsonify
 import os
 import json
 import logging
-from pathlib import Path
+import requests
 from openai import AzureOpenAI
 from dotenv import load_dotenv
 
@@ -18,7 +17,8 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-DATA_FILE = Path("leads.json")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
 client = AzureOpenAI(
     azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
@@ -82,18 +82,28 @@ Usa esta estructura exacta:
 Si un dato no aparece, deja cadena vacía.
 """
 
-def load_data():
-    if not DATA_FILE.exists():
-        return {}
-    try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+# In-memory store: { chat_id: { lead_data: {}, history: [] } }
+sessions = {}
 
-def save_data(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+EMPTY_LEAD = {
+    "nombre": "",
+    "tipo_cliente": "",
+    "producto": "",
+    "cantidad": "",
+    "origen": "",
+    "destino": "",
+    "presupuesto": "",
+    "urgencia": "",
+    "problemas": "",
+    "interes": "",
+}
+
+
+def get_session(chat_id):
+    if chat_id not in sessions:
+        sessions[chat_id] = {"lead_data": EMPTY_LEAD.copy(), "history": []}
+    return sessions[chat_id]
+
 
 def merge_lead_data(old, new):
     merged = old.copy()
@@ -102,29 +112,6 @@ def merge_lead_data(old, new):
             merged[key] = value.strip()
     return merged
 
-def get_chat_reply(user_message, lead_data):
-    context = f"""
-Datos actuales del lead:
-{json.dumps(lead_data, ensure_ascii=False)}
-"""
-
-    response = client.chat.completions.create(
-        model=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "system", "content": context},
-            {"role": "user", "content": user_message},
-        ],
-        max_completion_tokens=180,
-    )
-
-    logging.info(f"Response content: {response.choices[0].message.content}")
-    logging.info(f"Response finish_reason: {response.choices[0].finish_reason}")
-
-    content = response.choices[0].message.content
-    if not content:
-        content = getattr(response.choices[0].message, 'reasoning_content', '') or ''
-    return content.strip()
 
 def extract_lead_data(user_message):
     response = client.chat.completions.create(
@@ -143,11 +130,45 @@ def extract_lead_data(user_message):
     except (json.JSONDecodeError, ValueError):
         return {"nombre": None, "pais": None, "cantidad": None, "presupuesto": None, "interes": "desconocido"}
 
-def build_summary(phone, lead_data):
-    return f"""
-NUEVO CLIENTE DETECTADO
 
-WhatsApp: {phone}
+def get_chat_reply(history, lead_data):
+    context = f"""
+Datos actuales del lead:
+{json.dumps(lead_data, ensure_ascii=False)}
+"""
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": context},
+        *history,
+    ]
+
+    response = client.chat.completions.create(
+        model=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+        messages=messages,
+        max_completion_tokens=180,
+    )
+
+    logger.info("Response content: %s", response.choices[0].message.content)
+    logger.info("Response finish_reason: %s", response.choices[0].finish_reason)
+
+    content = response.choices[0].message.content
+    if not content:
+        content = getattr(response.choices[0].message, "reasoning_content", "") or ""
+    return content.strip()
+
+
+def is_lead_complete(lead_data):
+    required_fields = ["tipo_cliente", "producto", "cantidad"]
+    filled = sum(1 for field in required_fields if lead_data.get(field))
+    return filled >= 3
+
+
+def build_summary(chat_id, lead_data):
+    return f"""
+NUEVO CLIENTE DETECTADO (Telegram)
+
+Chat ID: {chat_id}
 Nombre: {lead_data.get("nombre", "")}
 Tipo: {lead_data.get("tipo_cliente", "")}
 Producto: {lead_data.get("producto", "")}
@@ -160,66 +181,69 @@ Problemas: {lead_data.get("problemas", "")}
 Interés: {lead_data.get("interes", "")}
 """.strip()
 
-def is_lead_complete(lead_data):
-    required_fields = ["tipo_cliente", "producto", "cantidad"]
-    filled = sum(1 for field in required_fields if lead_data.get(field))
-    return filled >= 3
+
+def send_telegram_message(chat_id, text):
+    payload = {"chat_id": chat_id, "text": text}
+    try:
+        resp = requests.post(TELEGRAM_API_URL, json=payload, timeout=10)
+        resp.raise_for_status()
+    except Exception:
+        logger.exception("Failed to send Telegram message to chat_id=%s", chat_id)
+
 
 @app.route("/")
 def home():
     return "OK FUNCIONANDO", 200
 
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    incoming_msg = request.form.get("Body", "").strip()
-    phone = request.form.get("From", "").strip()
 
-    response = MessagingResponse()
-    message = response.message()
+@app.route("/telegram-webhook", methods=["POST"])
+def telegram_webhook():
+    update = request.get_json(silent=True)
+    if not update:
+        return jsonify({"ok": True})
+
+    message = update.get("message") or update.get("edited_message")
+    if not message:
+        return jsonify({"ok": True})
+
+    chat_id = str(message.get("chat", {}).get("id", ""))
+    incoming_msg = (message.get("text") or "").strip()
+
+    if not chat_id:
+        return jsonify({"ok": True})
 
     if not incoming_msg:
-        logger.warning("Empty message received from %s", phone)
-        message.body("No recibí ningún mensaje.")
-        return str(response), 200
+        logger.warning("Empty message received from chat_id=%s", chat_id)
+        send_telegram_message(chat_id, "No recibí ningún mensaje.")
+        return jsonify({"ok": True})
 
-    logger.info("Incoming message from %s: %s", phone, incoming_msg)
+    logger.info("Incoming message from chat_id=%s: %s", chat_id, incoming_msg)
 
     try:
-        data = load_data()
-
-        if phone not in data:
-            logger.info("New contact: %s", phone)
-            data[phone] = {
-                "nombre": "",
-                "tipo_cliente": "",
-                "producto": "",
-                "cantidad": "",
-                "origen": "",
-                "destino": "",
-                "presupuesto": "",
-                "urgencia": "",
-                "problemas": "",
-                "interes": ""
-            }
+        session = get_session(chat_id)
 
         extracted = extract_lead_data(incoming_msg)
-        data[phone] = merge_lead_data(data[phone], extracted)
+        session["lead_data"] = merge_lead_data(session["lead_data"], extracted)
 
-        ai_reply = get_chat_reply(incoming_msg, data[phone])
-        logger.info("Reply to %s: %s", phone, ai_reply)
+        session["history"].append({"role": "user", "content": incoming_msg})
 
-        if is_lead_complete(data[phone]):
-            summary = build_summary(phone, data[phone])
+        ai_reply = get_chat_reply(session["history"], session["lead_data"])
+        logger.info("Reply to chat_id=%s: %s", chat_id, ai_reply)
+
+        session["history"].append({"role": "assistant", "content": ai_reply})
+
+        if is_lead_complete(session["lead_data"]):
+            summary = build_summary(chat_id, session["lead_data"])
             logger.info("Lead complete:\n%s", summary)
 
-        save_data(data)
-        message.body(ai_reply)
+        send_telegram_message(chat_id, ai_reply)
 
-    except Exception as e:
-        logger.exception("Error processing message from %s", phone)
-        message.body("Lo siento, hubo un error procesando tu mensaje. Inténtalo de nuevo.")
+    except Exception:
+        logger.exception("Error processing message from chat_id=%s", chat_id)
+        send_telegram_message(chat_id, "Disculpa, tengo un problema técnico. Inténtalo en un momento.")
 
-    return str(response), 200
+    return jsonify({"ok": True})
+
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))

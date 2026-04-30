@@ -2,3 +2,7 @@ flask
 gunicorn
 twilio
 openai
+azure-identity
+azure-ai-projects
+python-dotenv
+requests
