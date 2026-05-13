@@ -1,8 +1,8 @@
-﻿.venv/
+.venv/
 __pycache__/
 *.zip
+*.pyc
 leads.json
 .env
-main.py
 server_meta.py
 screencapture-github-*.png

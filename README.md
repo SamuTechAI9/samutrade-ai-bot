@@ -1,158 +1,153 @@
-# SamuTrade AI Bot 🤖
+# SamuTrade AI Bot
 
-> AI Telegram bot for international trade. Qualifies B2B leads in their own language so I only handle the serious ones.
+Multilingual Telegram bot that qualifies B2B leads for an international
+trade brokerage. It does not invent prices or commitments — it gathers
+structured data and prepares the case for a human agent.
 
-**🔗 Live demo:** [@SamuTradeAI_bot on Telegram](https://t.me/SamuTradeAI_bot)
+**Live:** [@SamuTradeAI_bot on Telegram](https://t.me/SamuTradeAI_bot)
 
----
+## What it does
 
-## 🎯 What it does
+1. Receives a Telegram message via webhook.
+2. Calls Azure OpenAI (`gpt-4o-mini`) twice:
+   - **`extract_lead_data`** — parses the conversation into structured JSON
+     (name, client type, product, quantity, origin, destination, budget, urgency, blockers, interest).
+   - **`get_chat_reply`** — generates the next conversational turn in the
+     user's language.
+3. Sends the reply back through the Telegram Bot API.
+4. Once enough fields are filled, produces a lead summary for the human agent.
 
-SamuTrade is an AI sales assistant for an international trade business. It engages with potential B2B clients on Telegram, detects their language, qualifies the lead through natural conversation, and prepares a structured handoff for the human agent (Samuel) to close the deal.
+## Why this exists
 
-Unlike a typical chatbot, this assistant **does not invent prices, stock or commitments**. It is a qualification layer — it gathers what the human needs to know, in the client's own language.
+The founder handles international trade inquiries across several languages
+and time zones. The bot pre-qualifies leads 24/7, so the human only engages
+when a real business opportunity is already structured.
 
----
+## Tech stack
 
-## 💡 Why this exists
+| Layer       | Technology                                      |
+|-------------|-------------------------------------------------|
+| Bot API     | Telegram Bot API (webhook mode)                 |
+| Runtime     | Python 3.12, Flask, Gunicorn                    |
+| AI          | Azure OpenAI `gpt-4o-mini` (`2024-12-01-preview`) |
+| Hosting     | Azure App Service Linux B1, West Europe         |
+| Auth        | Environment variables (no key vault for now)    |
 
-Running an import-export brokerage means handling first-contact conversations across multiple languages, time zones and product categories — from Shacman trucks for Senegal to watermelons from Morocco. Most leads are not serious. Filtering them manually is exhausting.
+## Architecture
 
-This bot handles the first conversation 24/7, gathers the structured data needed (product, volume, destination, urgency, budget) and lets me focus only on real opportunities.
-
----
-
-## 🛠️ Tech stack
-
-- **Python 3.12** + **Flask** — webhook server
-- **Azure OpenAI** (`gpt-4o-mini` deployment) — conversation engine
-- **Telegram Bot API** — public messaging channel
-- **Azure App Service** (Linux, B1) — production hosting
-- **gunicorn** — WSGI server
-
----
-
-## 🏗️ Architecture
-
-```text
-Client (Telegram user)
-        ↓
-Telegram Bot API
-        ↓
-Azure App Service (Flask + gunicorn)
-        ↓
-Azure OpenAI (gpt-4o-mini)
-        ↓
-Response back to user
+```
+Telegram user
+     │  HTTPS POST /telegram-webhook
+     ▼
+Flask app  (server_telegram.py)
+     │
+     ├─► extract_lead_data()  ──► Azure OpenAI  ──► structured JSON
+     │                                               (stored in sessions{})
+     └─► get_chat_reply()     ──► Azure OpenAI  ──► natural-language reply
+                                                         │
+                                              Telegram Bot API ──► user
 ```
 
-The Flask app exposes `/telegram-webhook`. Telegram pushes every incoming message to this endpoint. The handler:
+State is held in memory (`sessions` dict keyed by `chat_id`). No database yet.
 
-1. Extracts `chat_id` and `text` from the update
-2. Maintains per-chat conversation history in memory
-3. Calls Azure OpenAI twice: one for lead-data extraction (JSON), one for the natural reply
-4. Sends the reply back via `sendMessage` to the same `chat_id`
+## Features
 
----
+- Auto-detects the user's language and replies in it (Spanish, English,
+  French, Portuguese, Arabic, etc.)
+- Gathers lead data through natural conversation, one question at a time
+- Never invents prices, stock, or commitments — redirects to a human quote
+- Maintains per-conversation context in memory by `chat_id`
+- Generates a structured lead summary once enough data is captured
 
-## ✨ Features
+## Screenshots
 
-- 🌍 **Multilingual** — auto-detects and responds in Spanish, English, French, Portuguese, Arabic, etc.
-- 🎯 **Lead qualification** — gathers name, country, product, volume, destination, urgency
-- 💬 **One question at a time** — WhatsApp-style short messages, never form-like
-- 🛡️ **Honest by design** — never invents prices or commitments; redirects to human quote
-- 🔒 **Per-session memory** — keeps context within a conversation by `chat_id`
-- 📊 **Structured handoff** — when enough data is gathered, generates a lead summary
+**Live multilingual conversation**
 
----
+![Multilingual conversation](docs/screenshots/conversation-multilang.png)
 
-## 📸 Screenshots
+**Azure App Service production logs**
 
-**Live conversation: language switch mid-chat**
-The bot detects the language change from Spanish to English and adapts naturally.
+![Azure logs](docs/screenshots/azure-logs.png)
 
-![Live conversation showing multilingual switch](docs/screenshots/conversation-multilang.png)
-
-**Production logs: Azure App Service**
-Real-time logs from the deployed bot processing the conversation above.
-
-![Azure App Service production logs](docs/screenshots/azure-logs.png)
-
----
-
-## 🚀 Setup (local)
+## Setup (local)
 
 ```bash
-# Clone the repo
 git clone https://github.com/SamuTechAI9/samutrade-ai-bot.git
 cd samutrade-ai-bot
 
-# Create virtual environment
 python -m venv .venv
-source .venv/bin/activate    # Linux/Mac
-.venv\Scripts\activate       # Windows
+source .venv/bin/activate          # macOS / Linux
+.venv\Scripts\activate             # Windows PowerShell
 
-# Install dependencies
 pip install -r requirements.txt
 
-# Set environment variables (create your own .env)
-# AZURE_OPENAI_ENDPOINT=...
-# AZURE_OPENAI_API_KEY=...
-# AZURE_OPENAI_DEPLOYMENT=gpt-4o-mini
-# TELEGRAM_BOT_TOKEN=...
-
-# Run the server
+cp .env.example .env               # fill in real values
 python server_telegram.py
 ```
 
-To receive Telegram messages, expose your local server (e.g. with ngrok) and register the webhook:
+To receive real Telegram messages locally, expose port 5000 with ngrok and
+register the webhook:
 
 ```
-https://api.telegram.org/bot<YOUR_TOKEN>/setWebhook?url=<YOUR_PUBLIC_URL>/telegram-webhook
+https://api.telegram.org/bot<TOKEN>/setWebhook?url=<NGROK_URL>/telegram-webhook
 ```
 
----
+### Required environment variables
 
-## 📍 Status & roadmap
+| Variable                        | Description                          |
+|---------------------------------|--------------------------------------|
+| `TELEGRAM_BOT_TOKEN`            | From @BotFather                      |
+| `AZURE_OPENAI_ENDPOINT`         | Your Azure OpenAI resource endpoint  |
+| `AZURE_OPENAI_API_KEY`          | API key                              |
+| `AZURE_OPENAI_DEPLOYMENT`       | Deployment name (e.g. `gpt-4o-mini`) |
 
-**Current**
-- ✅ Bot live in production on Azure
-- ✅ Multilingual conversation working
-- ✅ Lead extraction and qualification logic
-- ✅ Public access via [t.me/SamuTradeAI_bot](https://t.me/SamuTradeAI_bot)
+## Production
 
-**Next**
-- ⏳ Refactor to `src/` and `docs/` folder structure
-- ⏳ Persistent lead storage (Azure Cosmos DB or SQLite)
-- ⏳ Notification system to forward qualified leads to human agent
-- ⏳ Dashboard to review and manage incoming leads
-- ⏳ Migration to WhatsApp Business API once company is registered
+| Component       | Value                                                                 |
+|-----------------|-----------------------------------------------------------------------|
+| Hosting         | Azure App Service Linux B1, West Europe                               |
+| App name        | `samutrade-ai-bot`                                                    |
+| Startup command | `gunicorn --bind 0.0.0.0:8000 --timeout 120 server_telegram:app`     |
+| Resource group  | `samutrade-ai`                                                        |
+| OpenAI resource | `samutrade-openai` (deployment: `gpt-4o-mini`)                       |
 
----
+## Project structure
 
-## 📂 Project structure note
+```
+SamuTrade_AI/
+├── server_telegram.py   # production Telegram webhook (active)
+├── server.py            # legacy WhatsApp/Twilio version (reference only)
+├── requirements.txt
+├── .gitignore
+└── docs/
+    └── screenshots/
+        ├── conversation-multilang.png
+        └── azure-logs.png
+```
 
-You'll find two server files in this repo:
+## Status & roadmap
 
-- `server_telegram.py` — **the active one**, running in production with Telegram Bot API.
-- `server.py` — the original WhatsApp/Twilio version. Kept as historical reference: the project started on WhatsApp via Twilio, then pivoted to Telegram once Meta business verification became a blocker without a registered company.
+**Running in production.**
 
-The Telegram version is what's currently deployed and what the live demo points to.
+| Done | Item |
+|------|------|
+| ✅ | Telegram webhook on Azure App Service |
+| ✅ | Multilingual replies via Azure OpenAI |
+| ✅ | Structured lead extraction (JSON) |
+| ⬜ | Persistent lead storage (Cosmos DB or SQLite) |
+| ⬜ | Push notification to human agent on qualified lead |
+| ⬜ | Lead-review dashboard |
+| ⬜ | `src/` package layout via staging slot |
+| ⬜ | WhatsApp Business API (pending company registration) |
 
----
+## About
 
-## 👤 About
+Built by **Samuel Torres Nebro** — international trader moving into AI and
+cloud development. Based in Trondheim, Norway.
 
-Built by **Samuel Torres Nebro**
-International trader moving into AI and cloud development.
-I like building real things, breaking them, fixing them, and making them work in production.
+[LinkedIn](https://www.linkedin.com/in/samuel-torres-0a882b292) ·
+[Email](mailto:samueltorressorser@gmail.com)
 
-📍 Trondheim, Norway
-🔗 [LinkedIn](https://www.linkedin.com/in/samuel-torres-0a882b292)
-📧 samueltorresSORSER@gmail.com
+## License
 
----
-
-## 📄 License
-
-MIT — feel free to fork and adapt.
+MIT
